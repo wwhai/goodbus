@@ -2,20 +2,19 @@ package goodbus
 
 import (
 	"errors"
+	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/plgd-dev/kit/v2/log"
 )
 
 type GoodbusApplication struct {
-	connected    bool
 	connection   *nats.Conn
 	errorhandler func(error)
 	appid        string
 }
 
 func NewApplication(appid string) IApplication {
-	return &GoodbusApplication{appid: appid, connected: false}
+	return &GoodbusApplication{appid: appid}
 }
 
 // 连接
@@ -25,39 +24,40 @@ func (app *GoodbusApplication) Auth(host, username, password string) error {
 		o.User = username
 		o.Password = password
 		o.AllowReconnect = true
+		o.ReconnectWait = 5 * time.Second
 		return nil
 	})
 	if err != nil {
-		log.Error(err)
 		return err
 	}
-	connection.SetClosedHandler(func(c *nats.Conn) {
-		log.Error("Closed")
+	connection.SetErrorHandler(func(c *nats.Conn, s *nats.Subscription, err error) {
 		if app.errorhandler != nil {
-			app.errorhandler(errors.New("Closed"))
+			app.errorhandler(err)
+		}
+	})
+	connection.SetClosedHandler(func(c *nats.Conn) {
+		if app.errorhandler != nil {
+			app.errorhandler(errors.New("closed"))
 		}
 	})
 	connection.SetReconnectHandler(func(c *nats.Conn) {
-		log.Error("Try Reconnect")
 		if app.errorhandler != nil {
-			app.errorhandler(errors.New("Reconnect"))
+			app.errorhandler(errors.New("reconnect"))
 		}
 	})
 	connection.SetDisconnectHandler(func(c *nats.Conn) {
-		log.Error("Disconnect")
 		if app.errorhandler != nil {
-			app.errorhandler(errors.New("Disconnect"))
+			app.errorhandler(errors.New("disconnect"))
 		}
 	})
 	app.connection = connection
-	app.connected = true
 	return nil
 
 }
 
 //
 func (app *GoodbusApplication) JoinChannel(channel string, callback func(msg Message)) error {
-	if app.connected {
+	if app.connection.IsClosed() {
 		_, err := app.connection.Subscribe(channel, func(m *nats.Msg) {
 			callback(Message{
 				Subject: m.Subject,
@@ -67,7 +67,6 @@ func (app *GoodbusApplication) JoinChannel(channel string, callback func(msg Mes
 			m.Ack()
 		})
 		if err != nil {
-			log.Error(err)
 			app.errorhandler(err)
 			return err
 		}
@@ -85,7 +84,7 @@ func (app *GoodbusApplication) SetErrorHandler(errorhandler func(error)) {
 
 //
 func (app *GoodbusApplication) Close() {
-	if app.connected {
+	if app.connection.IsConnected() {
 		app.connection.Drain()
 		app.connection.Close()
 	}
@@ -93,8 +92,10 @@ func (app *GoodbusApplication) Close() {
 }
 
 //
+// 发送数据
+//
 func (app *GoodbusApplication) Publish(data []byte) error {
-	if app.connected {
+	if app.connection.IsConnected() {
 		return app.connection.Publish(app.appid, data)
 	}
 	return nil
